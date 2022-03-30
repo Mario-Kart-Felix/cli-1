@@ -1,4 +1,7 @@
 'use strict'
+
+const execSync = require('child_process').execSync
+
 /*
 Usage:
 
@@ -11,97 +14,171 @@ Ordinarily this is run via the gen-changelog shell script, which appends
 the result to the changelog.
 
 */
-const execSync = require('child_process').execSync
-const branch = process.argv[2] || 'origin/latest'
-const log = execSync(`git log --reverse --pretty='format:%h %H%d %s (%aN)%n%b%n---%n' ${branch}...`).toString().split(/\n/)
+
+const parseArgs = (argv) => {
+  const result = {
+    releaseNotes: false,
+    branch: 'origin/latest',
+  }
+
+  for (const arg of argv) {
+    if (arg === '--release-notes') {
+      result.releaseNotes = true
+      continue
+    }
+
+    result.branch = arg
+  }
+
+  return result
+}
+
+const main = async () => {
+  const { branch, releaseNotes } = parseArgs(process.argv.slice(2))
+
+  const log = execSync(`git log --reverse --pretty='format:%h' ${branch}...`)
+    .toString()
+    .split(/\n/)
+
+  const query = `
+    fragment commitCredit on GitObject {
+      ... on Commit {
+        message
+        url
+        authors (first:10) {
+          nodes {
+            user {
+              login
+              url
+            }
+            email
+            name
+          }
+        }
+        associatedPullRequests (first:10) {
+          nodes {
+            number
+            url
+            merged
+          }
+        }
+      }
+    }
+
+    query {
+      repository (owner:"npm", name:"cli") {
+        ${log.map((sha) => `_${sha}: object (expression: "${sha}") {
+          ...commitCredit
+        }`).join('\n')}
+      }
+    }
+  `
+
+  const response = execSync(`gh api graphql -f query='${query}'`).toString()
+  const body = JSON.parse(response)
+
+  const output = {
+    Features: [],
+    'Bug Fixes': [],
+    Documentation: [],
+    Dependencies: [],
+  }
+
+  for (const [hash, data] of Object.entries(body.data.repository)) {
+    if (!data) {
+      console.error('no data for hash', hash)
+      continue
+    }
+
+    const message = data.message.replace(/^\s+/gm, '') // remove leading spaces
+      .replace(/(\r?\n)+/gm, '\n') // replace multiple newlines with one
+      .replace(/([^\s]+@\d+\.\d+\.\d+.*)/gm, '`$1`') // wrap package@version in backticks
+
+    const lines = message.split('\n')
+    // the title is the first line of the commit, 'let' because we change it later
+    let title = lines.shift()
+    // the body is the rest of the commit with some normalization
+    const body = lines.join('\n') // re-join our normalized commit into a string
+      .split(/\n?\*/gm) // split on lines starting with a literal *
+      .filter((line) => line.trim().length > 0) // remove blank lines
+      .map((line) => {
+        const clean = line.replace(/\n/gm, ' ') // replace new lines for this bullet with spaces
+        return clean.startsWith('*') ? clean : `* ${clean}` // make sure the line starts with *
+      })
+      .join('\n') // re-join with new lines
+
+    const type = title.startsWith('feat') ? 'Features'
+      : title.startsWith('fix') ? 'Bug Fixes'
+      : title.startsWith('docs') ? 'Documentation'
+      : title.startsWith('deps') ? 'Dependencies'
+      : null
+
+    const prs = data.associatedPullRequests.nodes.filter((pull) => pull.merged)
+    for (const pr of prs) {
+      title = title.replace(new RegExp(`\\s*\\(#${pr.number}\\)`, 'g'), '')
+    }
+
+    const commit = {
+      hash: hash.slice(1), // remove leading _
+      url: data.url,
+      title,
+      type,
+      body,
+      prs,
+      credit: data.authors.nodes.map((author) => {
+        if (author.user && author.user.login) {
+          return {
+            name: `@${author.user.login}`,
+            url: author.user.url,
+          }
+        }
+        // if the commit used an email that's not associated with a github account
+        // then the user field will be empty, so we fall back to using the committer's
+        // name and email as specified by git
+        return {
+          name: author.name,
+          url: `mailto:${author.email}`,
+        }
+      }),
+    }
+
+    if (commit.type) {
+      output[commit.type].push(commit)
+    }
+  }
+
+  for (const key of Object.keys(output)) {
+    if (output[key].length > 0) {
+      const groupHeading = `### ${key}`
+      console.group(groupHeading)
+      console.log() // blank line after heading
+
+      for (const commit of output[key]) {
+        let groupCommit = `* [\`${commit.hash}\`](${commit.url})`
+        for (const pr of commit.prs) {
+          groupCommit += ` [#${pr.number}](${pr.url})`
+        }
+        groupCommit += ` ${commit.title}`
+        if (key !== 'Dependencies') {
+          for (const user of commit.credit) {
+            if (releaseNotes) {
+              groupCommit += ` (${user.name})`
+            } else {
+              groupCommit += ` ([${user.name}](${user.url}))`
+            }
+          }
+        }
+        console.group(groupCommit)
+        if (commit.body && commit.body.length) {
+          console.log(commit.body)
+        }
+        console.groupEnd(groupCommit)
+      }
+
+      console.log() // blank line at end of group
+      console.groupEnd(groupHeading)
+    }
+  }
+}
 
 main()
-
-function shortname (url) {
-  const matched = url.match(/https:\/\/github\.com\/([^/]+\/[^/]+)\/(?:pull|issues)\/(\d+)/) ||
-                url.match(/https:\/\/(npm\.community)\/t\/(?:[^/]+\/)(\d+)/)
-  if (!matched)
-    return false
-  const repo = matched[1]
-  const id = matched[2]
-  if (repo !== 'npm/cli')
-    return `${repo}#${id}`
-  else
-    return `#${id}`
-}
-
-function printCommit (c) {
-  console.log(`* [\`${c.shortid}\`](https://github.com/npm/cli/commit/${c.fullid})`)
-  if (c.fixes.length) {
-    for (const fix of c.fixes) {
-      const label = shortname(fix)
-      if (label)
-        console.log(`  [${label}](${fix})`)
-    }
-  } else if (c.prurl) {
-    const label = shortname(c.prurl)
-    if (label)
-      console.log(`  [${label}](${c.prurl})`)
-    else
-      console.log(`  [#](${c.prurl})`)
-  }
-  const msg = c.message
-    .replace(/^\s+/mg, '')
-    .replace(/^[-a-z]+: /, '')
-    .replace(/^/mg, '  ')
-    .replace(/^ {2}Reviewed-by: @.*/mg, '')
-    .replace(/\n$/, '')
-    // backtickify package@version
-    .replace(/^(\s*@?[^@\s]+@\d+[.]\d+[.]\d+)\b(\s*\S)/g, '$1:$2')
-    .replace(/((?:\b|@)[^@\s]+@\d+[.]\d+[.]\d+)\b/g, '`$1`')
-    // linkify commitids
-    .replace(/\b([a-f0-9]{7,8})\b/g, '[`$1`](https://github.com/npm/cli/commit/$1)')
-  console.log(msg)
-  // don't assign credit for dep updates
-  if (!/^ {2}`[^`]+@\d+\.\d+\.\d+[^`]*`:?$/m.test(msg)) {
-    if (c.credit) {
-      c.credit.forEach(function (credit) {
-        console.log(`  ([@${credit}](https://github.com/${credit}))`)
-      })
-    } else
-      console.log(`  ([@${c.author}](https://github.com/${c.author}))`)
-  }
-}
-
-function main () {
-  let commit
-  log.forEach(function (line) {
-    line = line.replace(/\r/g, '')
-    let m
-    /* eslint no-cond-assign:0 */
-    if (/^---$/.test(line))
-      printCommit(commit)
-    else if (m = line.match(/^([a-f0-9]{7,10}) ([a-f0-9]+) (?:[(]([^)]+)[)] )?(.*?) [(](.*?)[)]/)) {
-      commit = {
-        shortid: m[1],
-        fullid: m[2],
-        branch: m[3],
-        message: m[4],
-        author: m[5],
-        prurl: null,
-        fixes: [],
-        credit: null,
-      }
-    } else if (m = line.match(/^PR-URL: (.*)/))
-      commit.prurl = m[1]
-    else if (m = line.match(/^Credit: @(.*)/)) {
-      if (!commit.credit)
-        commit.credit = []
-      commit.credit.push(m[1])
-    } else if (m = line.match(/^(?:Fix(?:es)|Closes?): #?([0-9]+)/))
-      commit.fixes.push(`https://github.com/npm/cli/issues/${m[1]}`)
-    else if (m = line.match(/^(?:Fix(?:es)|Closes?): ([^#]+)#([0-9]*)/))
-      commit.fixes.push(`https://github.com/${m[1]}/issues/${m[2]}`)
-    else if (m = line.match(/^(?:Fix(?:es)|Closes?): (https?:\/\/.*)/))
-      commit.fixes.push(m[1])
-    else if (m = line.match(/^Reviewed-By: @(.*)/))
-      commit.reviewed = m[1]
-    else if (/\S/.test(line))
-      commit.message += `\n${line}`
-  })
-}

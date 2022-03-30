@@ -1,0 +1,47 @@
+name: CI - docs
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - '*'
+    paths:
+      - docs/**
+  push:
+    branches:
+      - main
+      - latest
+    paths:
+      - docs/**
+  schedule:
+    # "At 02:00 on Monday" https://crontab.guru/#0_2_*_*_1
+    - cron: "0 2 * * 1"
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 16.x
+      - run: |
+          node ./bin/npm-cli.js install --ignore-scripts --no-audit
+          node ./bin/npm-cli.js rebuild
+      - run: node ./bin/npm-cli.js run lint -w docs
+        env:
+          DEPLOY_VERSION: testing
+
+  check_docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 16.x
+      - run: |
+          node ./bin/npm-cli.js install --ignore-scripts --no-audit
+      - name: Rebuild the docs
+        run: make freshdocs
+      - name: Git should not be dirty
+        run: node scripts/git-dirty.js

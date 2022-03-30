@@ -1,6 +1,13 @@
 name: Node CI
 
-on: [push, pull_request]
+on:
+  pull_request:
+    branches:
+      - '*'
+  push:
+    branches:
+      - latest
+  workflow_dispatch:
 
 jobs:
   lint:
@@ -9,9 +16,10 @@ jobs:
       # Checkout the npm/cli repo
       - uses: actions/checkout@v2
       - name: Use Node.js 14.x
-        uses: actions/setup-node@v1
+        uses: actions/setup-node@v2
         with:
           node-version: 14.x
+          cache: npm
       - name: Install dependencies
         run: |
           node ./bin/npm-cli.js install --ignore-scripts --no-audit
@@ -26,9 +34,10 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - name: Use Node.js 14.x
-        uses: actions/setup-node@v1
+        uses: actions/setup-node@v2
         with:
           node-version: 14.x
+          cache: npm
       - name: Install dependencies
         run: |
           node ./bin/npm-cli.js install --ignore-scripts --no-audit
@@ -44,14 +53,15 @@ jobs:
       # Checkout the npm/cli repo
       - uses: actions/checkout@v2
       - name: Use Node.js 14.x
-        uses: actions/setup-node@v1
+        uses: actions/setup-node@v2
         with:
           node-version: 14.x
+          cache: npm
       - name: Install dependencies
         run: |
           node ./bin/npm-cli.js install --ignore-scripts --no-audit
           node ./bin/npm-cli.js rebuild
-      - name: Run linting
+      - name: Validate licenses
         run: node ./bin/npm-cli.js run licenses
 
   smoke-tests:
@@ -80,9 +90,10 @@ jobs:
 
       # Installs the specific version of Node.js
     - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v1
+      uses: actions/setup-node@v2
       with:
         node-version: ${{ matrix.node-version }}
+        cache: npm
 
       # Run the installer script
     - name: Install dependencies
@@ -96,48 +107,7 @@ jobs:
       env:
         DEPLOY_VERSION: testing
 
-  workspaces-tests:
-    strategy:
-      fail-fast: false
-      matrix:
-        node-version: [12.x, 14.x, 16.x]
-        platform:
-          - os: ubuntu-latest
-            shell: bash
-          - os: macos-latest
-            shell: bash
-          - os: windows-latest
-            shell: bash
-          - os: windows-latest
-            shell: powershell
-
-    runs-on: ${{ matrix.platform.os }}
-    defaults:
-      run:
-        shell: ${{ matrix.platform.shell }}
-
-    steps:
-      # Checkout the npm/cli repo
-    - uses: actions/checkout@v2
-
-      # Installs the specific version of Node.js
-    - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v1
-      with:
-        node-version: ${{ matrix.node-version }}
-
-      # Run the installer script
-    - name: Install dependencies
-      run: |
-        node ./bin/npm-cli.js install --ignore-scripts --no-audit
-        node ./bin/npm-cli.js rebuild
-
-    - name: Run workspaces tests
-      run: node ./bin/npm-cli.js test -w ./packages -- --no-check-coverage -t600 -Rbase -c
-      env:
-        DEPLOY_VERSION: testing
-
-  build:
+  test:
     strategy:
       fail-fast: false
       matrix:
@@ -163,9 +133,10 @@ jobs:
 
       # Installs the specific version of Node.js
     - name: Use Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v1
+      uses: actions/setup-node@v2
       with:
         node-version: ${{ matrix.node-version }}
+        cache: npm
 
       # Run the installer script
     - name: Install dependencies
@@ -173,22 +144,6 @@ jobs:
         node ./bin/npm-cli.js install --ignore-scripts --no-audit
         node ./bin/npm-cli.js rebuild
 
-      # Run the tests, but not if we're just gonna do coveralls later anyway
+      # Run the tests
     - name: Run Tap tests
-      if: matrix.platform.os != 'ubuntu-latest' || matrix.node-version != '16.x'
-      run: node ./bin/npm-cli.js run --ignore-scripts test -- -t600 -Rbase -c
-      env:
-        DEPLOY_VERSION: testing
-
-      # Run coverage check
-    - name: Run coverage report
-      if: matrix.platform.os == 'ubuntu-latest' && matrix.node-version == '16.x'
-      # turn off --check-coverage until 100%, so CI failure is relevant
-      run: node ./bin/npm-cli.js run check-coverage -- -t600 --no-check-coverage -Rbase -c
-      env:
-        DEPLOY_VERSION: testing
-        COVERALLS_REPO_TOKEN: ${{ secrets.COVERALLS_OPTIONAL_TOKEN }}
-
-    # - name: Run sudo tests on Linux
-    #   if: matrix.os == 'ubuntu-latest'
-    #   run: sudo PATH=$PATH $(which node) . test -- --coverage  --timeout 600
+      run: node ./bin/npm-cli.js run test --ignore-scripts -- -t600 -Rbase -c
